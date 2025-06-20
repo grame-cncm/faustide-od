@@ -33,6 +33,9 @@ export type TDrawOptions = {
     sampleRate?: number;
 }
 
+const log = Math.log10;
+const pow = Math.pow;
+
 export class StaticScope {
     raf: number;
     ctx: CanvasRenderingContext2D;
@@ -314,62 +317,89 @@ export class StaticScope {
     static drawSpectroscope(ctx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor?: { x: number; y: number }) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
-        const { $, f, fftSize, fftOverlap } = d;
+        const { $, f, fftSize, fftOverlap, sampleRate } = d;
         if (!f || !f.length || !f[0].length) return;
         const fftBins = fftSize / 2;
         let $f = $ * fftOverlap / 2;
         $f -= $f % fftBins;
         const l = f[0].length;
-        const $0 = l - fftBins + Math.round(fftBins * zoomOffset);
-        const $1 = l - fftBins + Math.round(fftBins / zoom + fftBins * zoomOffset);
         const left = 50;
         const bottom = 20;
+
+        // Logarithmic scale setup
+        const fMin = sampleRate / fftSize; // Frequency of the first bin (index 1)
+        const fMax = sampleRate / 2;
+        if (fMin <= 0) return;
+
+        const fullLogRange = log(fMax) - log(fMin);
+        const viewLogRange = fullLogRange / zoom;
+        // zoomOffset is 0..1-1/zoom, so we need to map it to the portion of the range that is pannable
+        const startLog = log(fMin) + zoomOffset * fullLogRange;
+        const endLog = startLog + viewLogRange;
+
+        const fStart = pow(10, startLog);
+        const fEnd = pow(10, endLog);
+
+        const freqToIndex = (freq: number) => freq / fMax * fftBins;
+        const indexToFreq = (idx: number) => idx / fftBins * fMax;
+
+        const $0 = Math.max(1, Math.floor(freqToIndex(fStart)));
+        const $1 = Math.min(fftBins, Math.ceil(freqToIndex(fEnd)));
+
+        const eventsToDraw = this.drawGrid(ctx, w, h, fStart, fEnd, 0, 1, d, EScopeMode.Spectroscope);
         const hCh = (h - bottom) / f.length;
-        const eventsToDraw = this.drawGrid(ctx, w, h, $0, $1, 0, 1, d, EScopeMode.Spectroscope);
-        const gridX = (w - left) / ($1 - $0 - 1);
-        const step = Math.max(1, Math.round(1 / gridX));
+
         for (let i = 0; i < f.length; i++) {
             ctx.beginPath();
             ctx.fillStyle = f.length === 1 ? "white" : `hsl(${i * 60}, 100%, 85%)`;
-            let maxInStep;
+
+            const startX = left + (w - left) * (log(indexToFreq($0)) - startLog) / viewLogRange;
+            ctx.moveTo(startX, hCh * (i + 1));
+
             for (let j = $0; j < $1; j++) {
+                const freq = indexToFreq(j);
+                const x = left + (w - left) * (log(freq) - startLog) / viewLogRange;
                 const $j = wrap(j, $f, l);
                 const samp = f[i][$j];
-                const $step = (j - $0) % step;
-                if ($step === 0) maxInStep = samp;
-                if ($step !== step - 1) {
-                    if ($step !== 0 && samp > maxInStep) maxInStep = samp;
-                    continue;
-                }
-                const x = (j - $0) * gridX + left;
-                const y = hCh * (i + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
-                if (j === $0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+                const y = hCh * (i + 1 - Math.min(1, Math.max(0, samp / 100 + 1)));
+                ctx.lineTo(x, y);
             }
-            ctx.lineTo(w, hCh * (i + 1));
-            ctx.lineTo(left, hCh * (i + 1));
+            const lastFreq = indexToFreq($1 - 1);
+            if (lastFreq > 0) {
+                const lastX = left + (w - left) * (log(lastFreq) - startLog) / viewLogRange;
+                ctx.lineTo(lastX, hCh * (i + 1));
+            }
             ctx.closePath();
             ctx.fill();
         }
+
         eventsToDraw.forEach(params => this.drawEvent(ctx, w, h, ...params));
+
         if (cursor && cursor.x > left && cursor.y < h - bottom) {
             const statsToDraw: TStatsToDraw = { values: [] };
-            const $cursor = $0 + Math.round((cursor.x - left) / gridX);
-            statsToDraw.values = [];
-            statsToDraw.x = ($cursor - $0) * gridX + left;
-            statsToDraw.xLabel = indexToFreq($cursor, fftBins, d.sampleRate).toFixed(0);
-            const $j = wrap($cursor, $f, l);
-            for (let i = 0; i < f.length; i++) {
-                const samp = f[i][$j];
-                if (typeof samp === "number") statsToDraw.values.push(samp);
+
+            const L = w - left;
+            const logCursor = startLog + (cursor.x - left) / L * viewLogRange;
+            const fCursor = pow(10, logCursor);
+            const $cursor = Math.round(freqToIndex(fCursor));
+
+            if ($cursor >= 0 && $cursor < fftBins) {
+                statsToDraw.values = [];
+                statsToDraw.x = cursor.x;
+                statsToDraw.xLabel = fCursor.toFixed(0);
+                const $j = wrap($cursor, $f, l);
+                for (let i = 0; i < f.length; i++) {
+                    const samp = f[i][$j];
+                    if (typeof samp === "number") statsToDraw.values.push(samp);
+                }
+                this.drawStats(ctx, w, h, statsToDraw);
             }
-            this.drawStats(ctx, w, h, statsToDraw);
         }
     }
     static drawSpectrogram(ctx: CanvasRenderingContext2D, tempCtx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor?: { x: number; y: number }) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
-        const { $, f, fftSize, fftOverlap } = d;
+        const { $, f, fftSize, fftOverlap, sampleRate } = d;
         if (!f || !f.length || !f[0].length) return;
         const fftBins = fftSize / 2;
         let $f = $ * fftOverlap / 2;
@@ -399,25 +429,36 @@ export class StaticScope {
         if (cursor && cursor.x > left && cursor.y < h - bottom) {
             const statsToDraw: TStatsToDraw = { values: [] };
             const gridX = (w - left) / ($1fft - $0fft);
-            const gridY = (h - bottom) / f.length / fftBins;
             const $fft = $0fft + Math.floor((cursor.x - left) / gridX);
-            const $ch = Math.floor(cursor.y / gridY / fftBins);
-            const $bin = Math.floor((h - bottom - cursor.y) / gridY) % fftBins;
-            const $cursor = $fft * fftBins + $bin;
-            const $j = wrap($cursor, $f, f[0].length);
-            const freq = ($j % fftBins) / fftBins * d.sampleRate / 2;
-            const samp = f[$ch][$j];
-            if (typeof samp === "number") statsToDraw.values = [samp];
-            statsToDraw.x = ($fft - $0fft + 0.5) * gridX + left;
-            statsToDraw.y = (($ch + 1) * fftBins - $bin) * gridY;
-            statsToDraw.xLabel = $fft.toFixed(0);
-            statsToDraw.yLabel = freq.toFixed(0);
-            this.drawStats(ctx, w, h, statsToDraw);
+            const $ch = Math.floor(cursor.y / ((h - bottom) / f.length));
+
+            // Logarithmic Y cursor calculation
+            const hCh = (h - bottom) / f.length;
+            const yInCh = cursor.y - $ch * hCh;
+            const fMin = sampleRate / fftSize;
+            const fMax = sampleRate / 2;
+            if (fMin > 0) {
+                const logFMin = log(fMin);
+                const logFMax = log(fMax);
+                const logPos = (hCh - yInCh) / hCh;
+                const freq = pow(10, logFMin + logPos * (logFMax - logFMin));
+                const $bin = Math.floor(freq / fMax * fftBins);
+
+                const $cursor = $fft * fftBins + $bin;
+                const $j = wrap($cursor, $f, f[0].length);
+                const samp = f[$ch][$j];
+                if (typeof samp === "number") statsToDraw.values = [samp];
+                statsToDraw.x = ($fft - $0fft + 0.5) * gridX + left;
+                statsToDraw.y = cursor.y;
+                statsToDraw.xLabel = $fft.toFixed(0);
+                statsToDraw.yLabel = freq.toFixed(0);
+                this.drawStats(ctx, w, h, statsToDraw);
+            }
         }
     }
     static drawOfflineSpectrogram(ctx: CanvasRenderingContext2D, d: TDrawOptions, last$: number) {
         if (!d) return last$;
-        const { $, f, fftSize, fftOverlap } = d;
+        const { $, f, fftSize, fftOverlap, sampleRate } = d;
         if (!f || !f.length || !f[0].length) return last$;
         const fftBins = fftSize / 2;
         let $f = $ * fftOverlap / 2;
@@ -431,28 +472,37 @@ export class StaticScope {
         const $1fft = Math.ceil($1 / fftBins);
         const hCh = h / f.length;
         const w = l / fftBins;
-        const $h = hCh / fftBins;
         if (canvasWidth !== w) ctx.canvas.width = w;
-        const step = Math.max(1, Math.round(fftBins / hCh));
+
+        // Logarithmic scale setup
+        const fMin = sampleRate / fftSize;
+        const fMax = sampleRate / 2;
+        if (fMin <= 0) return last$;
+        const logFMin = log(fMin);
+        const logFMax = log(fMax);
+
+        const logPosToFreq = (pos: number) => pow(10, logFMin + pos * (logFMax - logFMin));
+        const freqToIndex = (freq: number) => Math.floor(freq / fMax * fftBins);
+
         for (let i = 0; i < f.length; i++) {
             for (let j = $0fft; j < $1fft; j++) {
-                let maxInStep;
-                ctx.fillStyle = "black";
-                ctx.fillRect(j % w, i * hCh, 1, hCh);
-                for (let k = 0; k < fftBins; k++) {
+                // Iterate over vertical pixels of the channel
+                for (let yPixel = 0; yPixel < hCh; yPixel++) {
+                    // Map pixel y to log position (0-1), then to frequency, then to bin index
+                    const logPos = (hCh - yPixel - 1) / hCh;
+                    const freq = logPosToFreq(logPos);
+                    const k = freqToIndex(freq);
+
+                    if (k >= fftBins || k < 0) continue;
+
                     const samp = f[i][wrap(k, j * fftBins, l)];
-                    const $step = k % step;
-                    if ($step === 0) maxInStep = samp;
-                    if ($step !== step - 1) {
-                        if ($step !== 0 && samp > maxInStep) maxInStep = samp;
-                        continue;
-                    }
-                    const normalized = Math.min(1, Math.max(0, (maxInStep + 10) / 100 + 1));
+                    const normalized = Math.min(1, Math.max(0, (samp + 10) / 100 + 1));
                     if (normalized === 0) continue;
+
                     const hue = (normalized * 180 + 240) % 360;
                     const lum = normalized * 50;
                     ctx.fillStyle = `hsl(${hue}, 100%, ${lum}%)`;
-                    ctx.fillRect(j % w, (fftBins - k - 1) * $h + i * hCh, 1, Math.max(1, $h));
+                    ctx.fillRect(j % w, i * hCh + yPixel, 1, 1);
                 }
             }
         }
@@ -468,19 +518,13 @@ export class StaticScope {
         ctx.save();
         ctx.setLineDash([]);
         ctx.lineWidth = 1;
-        const { t, e, bufferSize, fftSize, fftOverlap, sampleRate } = d;
+        const { e, bufferSize, fftSize, fftOverlap, sampleRate } = d;
         const inFreqDomain = mode === EScopeMode.Spectrogram || mode === EScopeMode.Spectroscope;
         const fftBins = fftSize / 2;
-        const channels = mode === EScopeMode.Oscilloscope ? 1 : t.length;
+        const channels = inFreqDomain ? d.f.length : d.t.length;
         const unit = mode === EScopeMode.Spectrogram ? "Hz/frame" : mode === EScopeMode.Spectroscope ? "dB/Hz" : "lvl/samp";
         const eventsToDraw: [number, { type: string; data: any }[]][] = [];
-        let $0buffer = $0 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
-        let $1buffer = $1 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
-        const hStep = 2 ** Math.ceil(Math.log2($1buffer - $0buffer)) / 8;
-        $0buffer -= $0buffer % hStep;
-        $1buffer -= $0buffer % hStep;
-        let $buffer = (d.$buffer || 0) + Math.round($zerox / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1));
-        if (inFreqDomain) $buffer -= $buffer % (fftBins / bufferSize / fftOverlap / 2);
+
         const left = 50;
         const bottom = 20;
         const eventStrokeStyle = "#ff8800";
@@ -488,6 +532,8 @@ export class StaticScope {
         const normalStrokeStyle = "#404040";
         ctx.fillStyle = "#DDDD99";
         ctx.font = "10px Consolas, monospace";
+
+        // Main axes
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
         ctx.fillText(unit, 45, h - 10, 40);
@@ -498,67 +544,139 @@ export class StaticScope {
         ctx.lineTo(left, h - bottom);
         ctx.lineTo(w, h - bottom);
         ctx.stroke();
-        ctx.strokeStyle = bufferStrokeStyle;
-        for (let j = $0buffer; j < $1buffer; j += hStep) {
-            const $fft = j / (fftBins / bufferSize) * fftOverlap / 2;
-            const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
-            if (x < left) continue;
-            ctx.strokeStyle = j % 1 === 0 ? bufferStrokeStyle : normalStrokeStyle;
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, h - bottom);
-            ctx.stroke();
-            if (mode === EScopeMode.Spectrogram) {
-                if ($fft % 1 === 0) ctx.fillText($fft.toFixed(), Math.min(x, w - 20), h - 10);
-            } else if (mode === EScopeMode.Spectroscope) {
-                ctx.fillText((($fft % 1) * sampleRate / 2).toFixed(), Math.min(x, w - 20), h - 10);
-            } else {
-                ctx.fillText((j * bufferSize).toFixed(), Math.min(x, w - 20), h - 10);
+
+        // X-Axis Grid
+        if (mode === EScopeMode.Spectroscope) {
+            const fStart = $0;
+            const fEnd = $1;
+            if (fStart > 0) {
+                const logFStart = log(fStart);
+                const logFEnd = log(fEnd);
+                const mag = Math.floor(logFStart);
+                for (let p = mag; p < logFEnd + 1; p++) {
+                    for (let m = 1; m < 10; m++) {
+                        const freq = m * pow(10, p);
+                        if (freq < fStart) continue;
+                        if (freq > fEnd) break;
+                        const x = left + (w - left) * (log(freq) - logFStart) / (logFEnd - logFStart);
+                        const isMajor = m === 1;
+                        ctx.strokeStyle = (isMajor || m === 5) ? bufferStrokeStyle : normalStrokeStyle;
+                        ctx.beginPath();
+                        ctx.moveTo(x, 0);
+                        ctx.lineTo(x, h - bottom);
+                        ctx.stroke();
+                        if (isMajor || m === 5 || (logFEnd - logFStart < 3 && (m === 2 || m === 7))) {
+                            ctx.fillText(freq >= 1000 ? `${(freq / 1000).toFixed(1)}k` : freq.toFixed(0), Math.min(x, w - 20), h - 10);
+                        }
+                    }
+                }
             }
-        }
-        if (e) {
-            ctx.strokeStyle = eventStrokeStyle;
-            for (let j = Math.ceil($0buffer); j < $1buffer; j++) {
-                if (e[$buffer + j] && e[$buffer + j].length) {
-                    const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
-                    if (x < left) continue;
-                    eventsToDraw.push([x, e[$buffer + j]]);
-                    ctx.beginPath();
-                    ctx.moveTo(x, 0);
-                    ctx.lineTo(x, h - bottom);
-                    ctx.stroke();
+        } else { // Linear X-Axis (Time-based)
+            let $0buffer = $0 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
+            let $1buffer = $1 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
+            const hStep = 2 ** Math.ceil(Math.log2($1buffer - $0buffer)) / 8;
+            $0buffer -= $0buffer % hStep;
+            $1buffer -= $0buffer % hStep;
+            let $buffer = (d.$buffer || 0) + Math.round($zerox / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1));
+            if (inFreqDomain) $buffer -= $buffer % (fftBins / bufferSize / fftOverlap / 2);
+
+            for (let j = $0buffer; j < $1buffer; j += hStep) {
+                const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
+                if (x < left) continue;
+                ctx.strokeStyle = j % 1 === 0 ? bufferStrokeStyle : normalStrokeStyle;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h - bottom);
+                ctx.stroke();
+                if (mode === EScopeMode.Spectrogram) {
+                    const $fft = j / (fftBins / bufferSize) * fftOverlap / 2;
+                    if ($fft % 1 === 0) ctx.fillText($fft.toFixed(), Math.min(x, w - 20), h - 10);
+                } else {
+                    ctx.fillText((j * bufferSize).toFixed(), Math.min(x, w - 20), h - 10);
+                }
+            }
+            if (e && mode !== EScopeMode.Spectroscope) { // Do not draw time-based events on frequency axis
+                ctx.strokeStyle = eventStrokeStyle;
+                for (let j = Math.ceil($0buffer); j < $1buffer; j++) {
+                    if (e[$buffer + j] && e[$buffer + j].length) {
+                        const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
+                        if (x < left) continue;
+                        eventsToDraw.push([x, e[$buffer + j]]);
+                        ctx.beginPath();
+                        ctx.moveTo(x, 0);
+                        ctx.lineTo(x, h - bottom);
+                        ctx.stroke();
+                    }
                 }
             }
         }
-        ctx.strokeStyle = normalStrokeStyle;
+
+        // Y-Axis Grid
         const hCh = (h - bottom) / channels;
-        let vStep = 0.25;
-        while (yFactor / vStep > 2) vStep *= 2; // Maximum horizontal grids in channel one side = 2
-        ctx.beginPath();
         ctx.textAlign = "right";
-        const drawHLine = (y: number, yLabel: string) => {
-            ctx.moveTo(left, y);
-            ctx.lineTo(w, y);
-            ctx.fillText(yLabel, 45, Math.max(y, 10));
-        };
-        for (let i = 0; i < channels; i++) {
-            let y = (i + 0.5) * hCh;
-            let $ = 0.5;
-            const getYLabel = () => (mode === EScopeMode.Spectrogram ? indexToFreq(fftBins * $, fftBins, sampleRate).toFixed(0) : mode === EScopeMode.Spectroscope ? (-100 + 100 * $).toFixed(0) : (-yFactor + 2 * yFactor * $).toFixed(2));
-            let yLabel = getYLabel();
-            drawHLine(y, yLabel);
-            for (let j = vStep; j < yFactor; j += vStep) {
-                $ = 0.5 - j / yFactor / 2;
-                y = (i + 0.5 + j / yFactor / 2) * hCh;
-                yLabel = getYLabel();
-                drawHLine(y, yLabel);
-                $ = 0.5 + j / yFactor / 2;
-                y = (i + 0.5 - j / yFactor / 2) * hCh;
-                yLabel = getYLabel();
-                drawHLine(y, yLabel);
+        ctx.textBaseline = "middle";
+
+        if (mode === EScopeMode.Spectrogram) {
+            const fMin = sampleRate / fftSize;
+            const fMax = sampleRate / 2;
+            if (fMin > 0) {
+                const logFMin = log(fMin);
+                const logFMax = log(fMax);
+                for (let i = 0; i < channels; i++) {
+                    const mag = Math.floor(logFMin);
+                    for (let p = mag; p < logFMax + 1; p++) {
+                        for (let m = 1; m < 10; m++) {
+                            const freq = m * pow(10, p);
+                            if (freq < fMin) continue;
+                            if (freq > fMax) break;
+                            const logPos = (log(freq) - logFMin) / (logFMax - logFMin);
+                            const y = i * hCh + (1 - logPos) * hCh;
+                            if (y < i * hCh || y > (i + 1) * hCh) continue;
+
+                            const isMajor = m === 1;
+                            const isMedium = m === 5;
+                            ctx.strokeStyle = (isMajor || isMedium) ? bufferStrokeStyle : normalStrokeStyle;
+                            ctx.beginPath();
+                            ctx.moveTo(left, y);
+                            ctx.lineTo(w, y);
+                            ctx.stroke();
+                            if (isMajor || isMedium) {
+                                ctx.fillText(freq >= 1000 ? `${(freq / 1000).toFixed(1)}k` : freq.toFixed(0), 45, Math.max(y, 10));
+                            }
+                        }
+                    }
+                }
             }
+        } else { // Linear Y-Axis
+            ctx.strokeStyle = normalStrokeStyle;
+            ctx.beginPath();
+            let vStep = 0.25;
+            while (yFactor / vStep > 2) vStep *= 2;
+            const drawHLine = (y: number, yLabel: string) => {
+                ctx.moveTo(left, y);
+                ctx.lineTo(w, y);
+                ctx.fillText(yLabel, 45, Math.max(y, 10));
+            };
+            for (let i = 0; i < (mode === EScopeMode.Oscilloscope ? 1 : channels); i++) {
+                let y = (i + 0.5) * hCh;
+                let $ = 0.5;
+                const getYLabel = () => (mode === EScopeMode.Spectroscope ? (-100 + 100 * $).toFixed(0) : (-yFactor + 2 * yFactor * $).toFixed(2));
+                let yLabel = getYLabel();
+                drawHLine(y, yLabel);
+                for (let j = vStep; j < yFactor; j += vStep) {
+                    $ = 0.5 - j / yFactor / 2;
+                    y = (i + 0.5 + j / yFactor / 2) * hCh;
+                    yLabel = getYLabel();
+                    drawHLine(y, yLabel);
+                    $ = 0.5 + j / yFactor / 2;
+                    y = (i + 0.5 - j / yFactor / 2) * hCh;
+                    yLabel = getYLabel();
+                    drawHLine(y, yLabel);
+                }
+            }
+            ctx.stroke();
         }
-        ctx.stroke();
+
         ctx.beginPath();
         ctx.setLineDash([4, 2]);
         ctx.strokeStyle = "white";
@@ -740,7 +858,7 @@ export class StaticScope {
             ctrl.appendChild(btn);
             try {
                 $(btn).tooltip({ trigger: "hover", boundary: "viewport" });
-            } catch (e) {} // eslint-disable-line no-empty
+            } catch (e) { } // eslint-disable-line no-empty
             this.btnSwitch = btn;
         }
         if (!this.btnZoomOut) {
@@ -753,7 +871,7 @@ export class StaticScope {
             ctrl.appendChild(btn);
             try {
                 $(btn).tooltip({ trigger: "hover", boundary: "viewport" });
-            } catch (e) {} // eslint-disable-line no-empty
+            } catch (e) { } // eslint-disable-line no-empty
             this.btnZoomOut = btn;
         }
         if (!this.btnZoom) {
@@ -766,7 +884,7 @@ export class StaticScope {
             ctrl.appendChild(btn);
             try {
                 $(btn).tooltip({ trigger: "hover", boundary: "viewport" });
-            } catch (e) {} // eslint-disable-line no-empty
+            } catch (e) { } // eslint-disable-line no-empty
             this.btnZoom = btn;
         }
         if (!this.btnZoomIn) {
@@ -779,7 +897,7 @@ export class StaticScope {
             ctrl.appendChild(btn);
             try {
                 $(btn).tooltip({ trigger: "hover", boundary: "viewport" });
-            } catch (e) {} // eslint-disable-line no-empty
+            } catch (e) { } // eslint-disable-line no-empty
             this.btnZoomIn = btn;
         }
 
@@ -793,7 +911,7 @@ export class StaticScope {
             ctrl.appendChild(btn);
             try {
                 $(btn).tooltip({ trigger: "hover", boundary: "viewport" });
-            } catch (e) {} // eslint-disable-line no-empty
+            } catch (e) { } // eslint-disable-line no-empty
             this.btnDownload = btn;
         }
 
@@ -917,27 +1035,41 @@ export class StaticScope {
     }
     drawCallback = () => {
         this.raf = undefined;
-        if (!this.data || !this.data.t || !this.data.t.length || !this.data.t[0].length) {
+        if (!this.data || (!this.data.t && !this.data.f) || (this.data.t && !this.data.t.length) || (this.data.f && !this.data.f.length)) {
             if (this.divDefault.style.display === "none") {
                 this.divDefault.style.display = "block";
-                return;
+                this.canvas.style.display = "none";
+                this.divData.style.display = "none";
             }
-        } else if (this.divDefault.style.display !== "none") this.divDefault.style.display = "none";
+            return;
+        }
+        if (this.divDefault.style.display !== "none") this.divDefault.style.display = "none";
+
         if (this.data && this.newDataArrived && this.drawSpectrogram) this.lastSpect$ = StaticScope.drawOfflineSpectrogram(this.spectTempCtx, this.data, this.lastSpect$);
         if (this.data.drawMode === "continuous" && this.canvas.offsetParent === null) return; // not visible
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         if (this.canvas.width !== w) this.canvas.width = w;
         if (this.canvas.height !== h) this.canvas.height = h;
-        if (this.mode === EScopeMode.Data) StaticScope.fillDivData(this.divData, this.data);
-        else if (this.mode === EScopeMode.Interleaved) StaticScope.drawInterleaved(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
-        else if (this.mode === EScopeMode.Oscilloscope) StaticScope.drawOscilloscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
-        else if (this.mode === EScopeMode.Spectroscope) StaticScope.drawSpectroscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
-        else if (this.mode === EScopeMode.Spectrogram) StaticScope.drawSpectrogram(this.ctx, this.spectTempCtx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
+
+        if (this.mode === EScopeMode.Data) {
+            StaticScope.fillDivData(this.divData, this.data);
+        } else if (this.mode === EScopeMode.Interleaved) {
+            StaticScope.drawInterleaved(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
+        } else if (this.mode === EScopeMode.Oscilloscope) {
+            StaticScope.drawOscilloscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
+        } else if (this.mode === EScopeMode.Spectroscope) {
+            StaticScope.drawSpectroscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
+        } else if (this.mode === EScopeMode.Spectrogram) {
+            StaticScope.drawSpectrogram(this.ctx, this.spectTempCtx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
+        }
         this.newDataArrived = false;
     };
     draw = (data?: TDrawOptions) => {
         if (data) {
+            if (data.f && (!this.data.f || this.data.f[0].length !== data.f[0].length)) {
+                this.lastSpect$ = 0; // Reset spectrogram canvas
+            }
             this.data = data;
             this.newDataArrived = true;
         }
@@ -962,7 +1094,8 @@ export class StaticScope {
         return this._zoom[this.zoomType];
     }
     set zoom(zoomIn) {
-        const maxZoom = this.data && this.data.t && this.data.t[0] ? Math.max(16, this.mode === EScopeMode.Spectroscope ? 16 : this.data.t[0].length / (this.inFreqDomain ? this.data.fftSize / 2 : this.data.bufferSize)) : 16;
+        const dataArray = this.inFreqDomain ? this.data.f : this.data.t;
+        const maxZoom = dataArray && dataArray[0] ? Math.max(16, this.mode === EScopeMode.Spectroscope ? 64 : dataArray[0].length / (this.inFreqDomain ? this.data.fftSize / 2 : this.data.bufferSize)) : 16;
         const w = this.canvas.width;
         let cursorIn = 0.5;
         const left = 50;
@@ -990,14 +1123,14 @@ export class StaticScope {
         this.spanSwitch.innerText = StaticScope.getModeName(modeIn);
         this._mode = modeIn;
         if (modeIn === EScopeMode.Data) {
-            this.divData.style.display = "";
+            this.divData.style.display = "block";
             this.canvas.style.display = "none";
             this.btnZoom.style.display = "none";
             this.btnZoomIn.style.display = "none";
             this.btnZoomOut.style.display = "none";
         } else {
             this.divData.style.display = "none";
-            this.canvas.style.display = "";
+            this.canvas.style.display = "block";
             this.btnZoom.style.display = "";
             this.btnZoomIn.style.display = "";
             this.btnZoomOut.style.display = "";
