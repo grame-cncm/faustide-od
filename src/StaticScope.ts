@@ -1,74 +1,152 @@
 import { wrap, indexToFreq } from "./utils";
 import "./StaticScope.scss";
 
+/**
+ * Enumeration for the different display modes of the scope.
+ */
 enum EScopeMode {
+    /** Raw numerical data view */
     Data = 0,
+    /** Interleaved multi-channel time-domain view */
     Interleaved = 1,
+    /** Overlaid multi-channel time-domain view */
     Oscilloscope = 2,
+    /** Frequency-domain view */
     Spectroscope = 3,
+    /** Time-frequency-domain view (waterfall) */
     Spectrogram = 4
 }
+
+/**
+ * Enumeration for the frequency scale modes.
+ */
 enum EFreqScaleMode {
+    /** Linear frequency scale */
     Linear,
+    /** Logarithmic frequency a scale */
     Logarithmic
 }
+
+/**
+ * Options for initializing the StaticScope instance.
+ */
 type TOptions = {
+    /** The container element for the scope */
     container: HTMLDivElement;
+    /** The initial display mode */
     type?: EScopeMode;
 };
+
+/**
+ * Defines the structure for statistics to be drawn on the canvas, typically at the cursor's position.
+ */
 type TStatsToDraw = {
+    /** The x-coordinate for the stat lines */
     x?: number;
+    /** The y-coordinate for the stat lines */
     y?: number;
+    /** The label for the x-axis value */
     xLabel?: string;
+    /** The label for the y-axis value */
     yLabel?: string;
+    /** The numerical values to display */
     values: number[];
 };
+
+/**
+ * Defines the data and options required for a drawing operation.
+ */
 export type TDrawOptions = {
+    /** The drawing mode */
     drawMode: "offline" | "continuous" | "onevent" | "manual";
-    $: number; // start sample index
-    $buffer: number; // start buffer index
-    t?: Float32Array[]; // Time domain data
-    f?: Float32Array[]; // Freq domain data
-    e?: { type: string; data: any }[][]; // events of each buffer
+    /** Start sample index in the circular buffer */
+    $: number;
+    /** Start buffer index */
+    $buffer: number;
+    /** Time domain data for each channel */
+    t?: Float32Array[];
+    /** Frequency domain data for each channel */
+    f?: Float32Array[];
+    /** Events associated with each buffer */
+    e?: { type: string; data: any }[][];
+    /** The size of each data buffer */
     bufferSize: number;
+    /** The size of the FFT window */
     fftSize: number;
+    /** The overlap factor for FFT calculations */
     fftOverlap: 1 | 2 | 4 | 8;
+    /** Estimated fundamental frequency for stabilization */
     freqEstimated?: number;
+    /** The sample rate of the audio data */
     sampleRate?: number;
 }
 
 const log = Math.log10;
 const pow = Math.pow;
 
+/**
+ * The main class for the static scope, handling rendering and user interaction.
+ */
 export class StaticScope {
+    /** ID of the current requestAnimationFrame */
     raf: number;
+    /** 2D rendering context of the main canvas */
     ctx: CanvasRenderingContext2D;
+    /** The container element for the scope */
     container: HTMLDivElement;
+    /** The canvas element where the scope is drawn */
     canvas: HTMLCanvasElement;
+    /** Button to switch between scope modes */
     btnSwitch: HTMLButtonElement;
+    /** Button to zoom out */
     btnZoomOut: HTMLButtonElement;
+    /** Button to display and reset zoom level */
     btnZoom: HTMLButtonElement;
+    /** Button to zoom in */
     btnZoomIn: HTMLButtonElement;
+    /** Button to switch between frequency scales (linear/log) */
     btnScale: HTMLButtonElement;
+    /** Button to download the current data as a CSV file */
     btnDownload: HTMLButtonElement;
+    /** Icon element within the switch button */
     iSwitch: HTMLElement;
+    /** Span element for text within the switch button */
     spanSwitch: HTMLSpanElement;
+    /** Icon element within the scale button */
     iScale: HTMLElement;
+    /** Div element to display raw data */
     divData: HTMLDivElement;
+    /** Div element to display a "No Data" message */
     divDefault: HTMLDivElement;
+    /** The current display mode */
     private _mode = EScopeMode.Oscilloscope;
+    /** The current frequency scale mode */
     private _freqScaleMode = EFreqScaleMode.Logarithmic;
+    /** Horizontal zoom levels for different modes */
     private _zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
+    /** Vertical zoom levels for different modes */
     private _vzoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
+    /** Horizontal zoom offsets for different modes */
     private _zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
+    /** The current data and options for drawing */
     data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2 };
+    /** Current cursor position on the canvas */
     cursor: { x: number; y: number };
+    /** Flag indicating if the user is currently dragging the mouse */
     dragging: boolean = false;
+    /** A temporary 2D context for rendering the spectrogram offline */
     spectTempCtx: CanvasRenderingContext2D;
+    /** The last sample index drawn for the spectrogram */
     lastSpect$: number = 0;
+    /** Flag to enable/disable spectrogram drawing */
     drawSpectrogram: boolean = false;
+    /** Flag to indicate if new data has arrived since the last draw call */
     newDataArrived: boolean = false;
 
+    /**
+     * Handles mouse movement over the canvas to display cursor information.
+     * @param {MouseEvent | TouchEvent} e The mouse or touch event.
+     */
     handleMouseMove = (e: MouseEvent | TouchEvent) => {
         if (!this.data || !this.data.t || !this.data.t.length || !this.data.t[0].length) return;
         if (this.mode === EScopeMode.Data) return;
@@ -83,6 +161,10 @@ export class StaticScope {
         // if (this.data.drawMode === "continuous") return;
         this.draw();
     }
+    /**
+     * Handles mouse down events for panning the view.
+     * @param {MouseEvent | TouchEvent} eDown The mouse or touch event.
+     */
     handleMouseDown = (eDown: MouseEvent | TouchEvent) => {
         if (!this.data || !this.data.t || !this.data.t.length || !this.data.t[0].length) return;
         if (this.mode === EScopeMode.Data) return;
@@ -120,12 +202,26 @@ export class StaticScope {
         document.addEventListener("mouseup", handleMouseUp);
         document.addEventListener("touchend", handleMouseUp);
     }
+    /**
+     * Handles the mouse leaving the canvas area.
+     */
     handleMouseLeave = () => {
         if (!this.data || !this.data.t || !this.data.t.length || !this.data.t[0].length) return;
         if (this.mode === EScopeMode.Data) return;
         this.cursor = undefined;
         this.draw();
     }
+    /**
+     * Draws the scope in interleaved mode.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {number} zoom The horizontal zoom level.
+     * @param {number} zoomOffset The horizontal zoom offset.
+     * @param {number} vzoom The vertical zoom level.
+     * @param {{ x: number; y: number }} [cursor] The current cursor position.
+     */
     static drawInterleaved(ctx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, vzoom: number, cursor?: { x: number; y: number }) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
@@ -224,6 +320,17 @@ export class StaticScope {
             this.drawStats(ctx, w, h, statsToDraw);
         }
     }
+    /**
+     * Draws the scope in oscilloscope mode.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {number} zoom The horizontal zoom level.
+     * @param {number} zoomOffset The horizontal zoom offset.
+     * @param {number} vzoom The vertical zoom level.
+     * @param {{ x: number; y: number }} [cursor] The current cursor position.
+     */
     static drawOscilloscope(ctx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, vzoom: number, cursor?: { x: number; y: number }) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
@@ -321,6 +428,17 @@ export class StaticScope {
             this.drawStats(ctx, w, h, statsToDraw);
         }
     }
+    /**
+     * Draws the scope in spectroscope mode.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {number} zoom The horizontal zoom level.
+     * @param {number} zoomOffset The horizontal zoom offset.
+     * @param {{ x: number; y: number }} cursor The current cursor position.
+     * @param {EFreqScaleMode} scale The frequency scale mode (linear or log).
+     */
     static drawSpectroscope(ctx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor: { x: number; y: number }, scale: EFreqScaleMode) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
@@ -434,6 +552,18 @@ export class StaticScope {
             }
         }
     }
+    /**
+     * Draws the scope in spectrogram mode.
+     * @param {CanvasRenderingContext2D} ctx The main canvas rendering context.
+     * @param {CanvasRenderingContext2D} tempCtx The temporary canvas context holding the full spectrogram.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {number} zoom The horizontal zoom level.
+     * @param {number} zoomOffset The horizontal zoom offset.
+     * @param {{ x: number; y: number }} cursor The current cursor position.
+     * @param {EFreqScaleMode} scale The frequency scale mode (linear or log).
+     */
     static drawSpectrogram(ctx: CanvasRenderingContext2D, tempCtx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor: { x: number; y: number }, scale: EFreqScaleMode) {
         this.drawBackground(ctx, w, h);
         if (!d) return;
@@ -501,6 +631,14 @@ export class StaticScope {
             }
         }
     }
+    /**
+     * Renders new spectrogram data to the temporary canvas.
+     * @param {CanvasRenderingContext2D} ctx The temporary canvas rendering context.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {number} last$ The last sample index that was drawn.
+     * @param {EFreqScaleMode} scale The frequency scale mode (linear or log).
+     * @returns {number} The new last sample index.
+     */
     static drawOfflineSpectrogram(ctx: CanvasRenderingContext2D, d: TDrawOptions, last$: number, scale: EFreqScaleMode) {
         if (!d) return last$;
         const { $, f, fftSize, fftOverlap, sampleRate } = d;
@@ -573,12 +711,32 @@ export class StaticScope {
         }
         return wrap($1, 0, l);
     }
+    /**
+     * Draws the background of the canvas.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     */
     static drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number) {
         ctx.save();
         ctx.fillStyle = "#181818";
         ctx.fillRect(0, 0, w, h);
         ctx.restore();
     }
+    /**
+     * Draws the grid lines and labels for axes.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {number} $0 The starting index (sample or frequency bin) for drawing.
+     * @param {number} $1 The ending index for drawing.
+     * @param {number} $zerox The zero-crossing offset for stabilization.
+     * @param {number} yFactor The vertical scaling factor.
+     * @param {TDrawOptions} d The data and options for drawing.
+     * @param {EScopeMode} mode The current scope mode.
+     * @param {EFreqScaleMode} [scale] The frequency scale mode.
+     * @returns {[number, { type: string; data: any }[]][]} An array of events to be drawn.
+     */
     static drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, $0: number, $1: number, $zerox: number, yFactor: number, d: TDrawOptions, mode: EScopeMode, scale?: EFreqScaleMode) {
         ctx.save();
         ctx.setLineDash([]);
@@ -770,6 +928,14 @@ export class StaticScope {
         ctx.restore();
         return eventsToDraw;
     }
+    /**
+     * Draws event information on the canvas.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {number} x The x-coordinate for the event display.
+     * @param {{ type: string; data: any }[]} e The array of events to display.
+     */
     static drawEvent(ctx: CanvasRenderingContext2D, w: number, h: number, x: number, e: { type: string; data: any }[]) {
         ctx.save();
         ctx.font = "bold 12px Consolas, monospace";
@@ -787,6 +953,13 @@ export class StaticScope {
         eStrings.forEach((s, i) => ctx.fillText(s, x, (i + 1) * 15, textWidth));
         ctx.restore();
     }
+    /**
+     * Draws statistics (cursor lines and values) on the canvas.
+     * @param {CanvasRenderingContext2D} ctx The canvas rendering context.
+     * @param {number} w The width of the canvas.
+     * @param {number} h The height of the canvas.
+     * @param {TStatsToDraw} statsToDraw The statistics data to draw.
+     */
     static drawStats(ctx: CanvasRenderingContext2D, w: number, h: number, statsToDraw: { x?: number; y?: number; xLabel?: string; yLabel?: string; values: number[] }) {
         const left = 50;
         const bottom = 20;
@@ -823,6 +996,11 @@ export class StaticScope {
         right.forEach((s, i) => ctx.fillText(s, w - 2, (i + 1) * 15, 70));
         ctx.restore();
     }
+    /**
+     * Fills a div with a table-like view of the raw data.
+     * @param {HTMLDivElement} container The div element to fill.
+     * @param {TDrawOptions} d The data to display.
+     */
     static fillDivData(container: HTMLDivElement, d: TDrawOptions) {
         container.innerHTML = "";
         if (!d) return;
@@ -862,6 +1040,11 @@ export class StaticScope {
             container.appendChild(divCh);
         }
     }
+    /**
+     * Gets the Font Awesome icon class name for a given scope mode.
+     * @param {EScopeMode} typeIn The scope mode.
+     * @returns {string} The corresponding class name.
+     */
     static getIconClassName(typeIn: EScopeMode) {
         const prefix = "fas fa-sm ";
         if (typeIn === EScopeMode.Data) return prefix + "fa-table";
@@ -871,6 +1054,11 @@ export class StaticScope {
         if (typeIn === EScopeMode.Spectrogram) return prefix + "fa-align-justify";
         return prefix;
     }
+    /**
+     * Gets the display name for a given scope mode.
+     * @param {EScopeMode} typeIn The scope mode.
+     * @returns {string} The corresponding name.
+     */
     static getModeName(typeIn: EScopeMode) {
         if (typeIn === EScopeMode.Data) return "Data";
         if (typeIn === EScopeMode.Interleaved) return "Interleaved";
@@ -880,6 +1068,10 @@ export class StaticScope {
         return "";
     }
 
+    /**
+     * Creates an instance of StaticScope.
+     * @param {TOptions} options The initialization options.
+     */
     constructor(options: TOptions) {
         Object.assign(this, options);
         this.getChildren();
@@ -887,6 +1079,9 @@ export class StaticScope {
         this.mode = EScopeMode.Oscilloscope;
         this.freqScaleMode = EFreqScaleMode.Logarithmic;
     }
+    /**
+     * Finds or creates the necessary child DOM elements for the scope.
+     */
     getChildren() {
         this.spectTempCtx = document.createElement("canvas").getContext("2d");
         this.spectTempCtx.canvas.height = 1024;
@@ -1036,6 +1231,9 @@ export class StaticScope {
             this.iScale = i;
         }
     }
+    /**
+     * Binds all event listeners for the UI elements.
+     */
     bind() {
         this.btnSwitch.addEventListener("click", () => {
             let newType = (this.mode + 1) % 5;
@@ -1139,6 +1337,9 @@ export class StaticScope {
         this.canvas.addEventListener("mouseleave", this.handleMouseLeave);
         this.canvas.addEventListener("touchend", this.handleMouseLeave);
     }
+    /**
+     * The callback function that is executed on each animation frame to draw the scope.
+     */
     drawCallback = () => {
         this.raf = undefined;
         if (!this.data || (!this.data.t && !this.data.f) || (this.data.t && !this.data.t.length) || (this.data.f && !this.data.f.length)) {
@@ -1173,6 +1374,10 @@ export class StaticScope {
         }
         this.newDataArrived = false;
     };
+    /**
+     * Triggers a redraw of the scope. If data is provided, it updates the scope's data.
+     * @param {TDrawOptions} [data] The new data to draw.
+     */
     draw = (data?: TDrawOptions) => {
         if (data) {
             if (data.f && (!this.data.f || this.data.f[0].length !== data.f[0].length)) {
@@ -1184,6 +1389,10 @@ export class StaticScope {
         if (this.raf) return;
         this.raf = requestAnimationFrame(this.drawCallback);
     }
+    /**
+     * Gets the zoom type string based on the current mode.
+     * @type {("spectroscope" | "spectrogram" | "oscilloscope")}
+     */
     get zoomType() {
         return this.mode === EScopeMode.Spectroscope
             ? "spectroscope"
@@ -1191,16 +1400,32 @@ export class StaticScope {
                 ? "spectrogram"
                 : "oscilloscope";
     }
+    /**
+     * Gets the current vertical zoom level for the active mode.
+     * @type {number}
+     */
     get vzoom() {
         return this._vzoom[this.zoomType];
     }
+    /**
+     * Sets the vertical zoom level for the active mode.
+     * @type {number}
+     */
     set vzoom(zoomIn) {
         const maxZoom = 16;
         this._vzoom[this.zoomType] = Math.min(maxZoom, Math.max(1, zoomIn));
     }
+    /**
+     * Gets the current horizontal zoom level for the active mode.
+     * @type {number}
+     */
     get zoom() {
         return this._zoom[this.zoomType];
     }
+    /**
+     * Sets the horizontal zoom level, adjusting the offset to zoom towards the cursor.
+     * @type {number}
+     */
     set zoom(zoomIn) {
         const dataArray = this.inFreqDomain ? this.data.f : this.data.t;
         const maxZoom = dataArray && dataArray[0] ? Math.max(16, this.mode === EScopeMode.Spectroscope ? 64 : dataArray[0].length / (this.inFreqDomain ? this.data.fftSize / 2 : this.data.bufferSize)) : 16;
@@ -1213,19 +1438,38 @@ export class StaticScope {
         this.zoomOffset = cursor - cursorIn / this.zoom;
         this.btnZoom.innerHTML = this.zoom.toFixed(1) + "x";
     }
+    /**
+     * Gets the current horizontal zoom offset for the active mode.
+     * @type {number}
+     */
     get zoomOffset() {
         return this._zoomOffset[this.zoomType];
     }
+    /**
+     * Sets the horizontal zoom offset, clamped between 0 and `1 - 1/zoom`.
+     * @type {number}
+     */
     set zoomOffset(zoomOffsetIn) {
         this._zoomOffset[this.zoomType] = Math.max(0, Math.min(1 - 1 / this.zoom, zoomOffsetIn));
     }
+    /**
+     * Resets zoom and offset for all modes to their default values.
+     */
     resetZoom() {
         this._zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
         this._zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
     }
+    /**
+     * Gets the current frequency scale mode.
+     * @type {EFreqScaleMode}
+     */
     get freqScaleMode() {
         return this._freqScaleMode;
     }
+    /**
+     * Sets the frequency scale mode and updates the UI and drawing.
+     * @type {EFreqScaleMode}
+     */
     set freqScaleMode(modeIn: EFreqScaleMode) {
         this._freqScaleMode = modeIn;
         if (modeIn === EFreqScaleMode.Linear) {
@@ -1242,9 +1486,17 @@ export class StaticScope {
         this.spectTempCtx.clearRect(0, 0, this.spectTempCtx.canvas.width, this.spectTempCtx.canvas.height);
         this.draw();
     }
+    /**
+     * Gets the current scope display mode.
+     * @type {EScopeMode}
+     */
     get mode() {
         return this._mode;
     }
+    /**
+     * Sets the scope display mode and updates the UI accordingly.
+     * @type {EScopeMode}
+     */
     set mode(modeIn) {
         this.iSwitch.className = StaticScope.getIconClassName(modeIn);
         this.spanSwitch.innerText = StaticScope.getModeName(modeIn);
@@ -1261,6 +1513,11 @@ export class StaticScope {
         }
         this.draw();
     }
+    /**
+     * Checks if the current mode is frequency-domain based.
+     * @readonly
+     * @type {boolean}
+     */
     get inFreqDomain() {
         return this.mode === EScopeMode.Spectrogram || this.mode === EScopeMode.Spectroscope;
     }
